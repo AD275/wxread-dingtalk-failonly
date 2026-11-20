@@ -22,6 +22,9 @@ jobs:
   deploy:
     runs-on: ubuntu-22.04
     environment: AutoRead  # 指定环境
+    permissions:
+      actions: read
+      contents: read
 
     steps:
     - name: Random schedule gate
@@ -91,8 +94,43 @@ jobs:
         python -m pip install --upgrade pip
         pip install certifi==2024.8.30 charset-normalizer==3.4.0 idna==3.10 requests==2.32.3 urllib3==2.2.3
 
-    - name: Run deployment script
+    - name: Check for an earlier run today
+      id: reading_day
       if: steps.schedule_gate.outputs.should_run == 'true'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        READ_MODE: ${{ vars.READ_MODE || (secrets.WEREAD_API_KEY != '' && 'adaptive') || 'fixed' }}
+      run: |
+        if [[ "$READ_MODE" != adaptive ]]; then
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        day=$(TZ=Asia/Shanghai date +%F)
+        marker="wxread-started-$day"
+        count=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/artifacts" -f name="$marker" --jq '.total_count')
+        if [[ "$count" != 0 ]]; then
+          echo "Already started a reading task on $day; skipping."
+          echo "proceed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        printf '%s\n' "$day" > "$RUNNER_TEMP/wxread-started.txt"
+        {
+          echo "proceed=true"
+          echo "day=$day"
+          echo "marker=$marker"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Record today's first attempt
+      if: steps.reading_day.outputs.marker != ''
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.reading_day.outputs.marker }}
+        path: ${{ runner.temp }}/wxread-started.txt
+        if-no-files-found: error
+        retention-days: 3
+
+    - name: Run deployment script
+      if: steps.reading_day.outputs.proceed == 'true'
       env:
         WXREAD_CURL_BASH: ${{ secrets.WXREAD_CURL_BASH }}
         PUSH_METHOD: ${{ secrets.PUSH_METHOD }}
@@ -104,6 +142,9 @@ jobs:
         SERVERCHAN_SPT:  ${{ secrets.SERVERCHAN_SPT }}
         DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
         DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+        READ_MODE: ${{ vars.READ_MODE || (secrets.WEREAD_API_KEY != '' && 'adaptive') || 'fixed' }}
+        WEREAD_API_KEY: ${{ secrets.WEREAD_API_KEY }}
+        READING_DAY: ${{ steps.reading_day.outputs.day }}
         READ_NUM: ${{ vars.READ_NUM }}  # 使用 Repository Variables
 
       run: |

@@ -4,8 +4,10 @@ import time
 import random
 import logging
 import hashlib
+import os
 import requests
 import urllib.parse
+from datetime import datetime, time as clock_time, timedelta, timezone
 from push import push
 from log_utils import setup_logging
 from config import data, headers, cookies, READ_NUM, PUSH_METHOD, PUSH_NOTIFY_TYPE, book, chapter
@@ -20,6 +22,8 @@ COOKIE_DATA_VARIANTS = [{"rq": "%2Fweb%2Fbook%2Fread", "ql": False},{"rq": "%2Fw
 REQUEST_TIMEOUT = (10, 30)
 SYNCKEY_REPAIR_LIMIT = 3
 SYNCKEY_REPAIR_DELAY = 5
+BEIJING_TZ = timezone(timedelta(hours=8))
+STATS_URL = "https://i.weread.qq.com/api/agent/gateway"
 
 
 def encode_data(data):
@@ -119,14 +123,72 @@ def should_push_success():
     return notify_type not in ("fail", "failed", "failure", "fail_only", "failure_only", "only_fail")
 
 
+def fetch_read_seconds(today):
+    api_key = os.getenv("WEREAD_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("动态模式需要配置微信读书官方 API Key（WEREAD_API_KEY）。")
+
+    day_start = datetime.combine(today, clock_time.min, BEIJING_TZ)
+    try:
+        response = requests.post(
+            STATS_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "api_name": "/readdata/detail",
+                "mode": "monthly",
+                "baseTime": int((day_start + timedelta(hours=12)).timestamp()),
+                "skill_version": "1.0.6",
+            },
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"阅读统计请求失败（{type(exc).__name__}）。") from None
+    if response.status_code != 200:
+        raise RuntimeError(f"阅读统计请求失败（HTTP {response.status_code}）。")
+    try:
+        result = response.json()
+    except ValueError:
+        raise RuntimeError("阅读统计接口返回了非 JSON 响应。") from None
+    if not isinstance(result, dict) or result.get("errcode", 0) != 0:
+        raise RuntimeError("微信读书未返回有效的阅读统计，请检查官方 API Key。")
+
+    daily_totals = result.get("readTimes")
+    if not isinstance(daily_totals, dict):
+        raise RuntimeError("微信读书未返回每日阅读明细，无法判断今天的时长。")
+    if any(not timestamp.isascii() or not timestamp.isdecimal() or len(timestamp) > 12
+           or (int(timestamp) - int(day_start.timestamp())) % 86400 for timestamp in daily_totals):
+        raise RuntimeError("微信读书返回的每日统计时间与北京时间不匹配。")
+    seconds = daily_totals.get(str(int(day_start.timestamp())), 0)
+    if type(seconds) is not int or not 0 <= seconds <= 86400:
+        raise RuntimeError("微信读书返回的当天阅读时长无效。")
+    return seconds
+
+
+def select_read_target(today):
+    mode = os.getenv("READ_MODE", "fixed")
+    if mode == "fixed":
+        return READ_NUM
+    if mode != "adaptive":
+        raise ValueError("READ_MODE 必须为 adaptive 或 fixed。")
+
+    if os.getenv("GITHUB_ACTIONS") == "true" and os.getenv("READING_DAY") != today.isoformat():
+        raise RuntimeError("当天运行记录未建立或已跨日，跳过本次动态任务。")
+    seconds = fetch_read_seconds(today)
+    if seconds == 0:
+        return random.randint(12, 30)
+    return min(180, 30 + (seconds ** 2 + 107999) // 108000)
+
+
 def run_read_task():
+    read_target = select_read_target(datetime.now(BEIJING_TZ).date())
     refresh_cookie()
     index = 1
     lastTime = int(time.time()) - 30
     synckey_repair_attempts = 0
-    logging.info(f"一共需要阅读 {READ_NUM} 次。")
+    logging.info(f"一共需要阅读 {read_target} 次。")
 
-    while index <= READ_NUM:
+    while index <= read_target:
         data.pop('s')
         data['b'] = random.choice(book)
         data['c'] = random.choice(chapter)
@@ -138,7 +200,7 @@ def run_read_task():
         data['sg'] = hashlib.sha256(f"{data['ts']}{data['rn']}{KEY}".encode()).hexdigest()
         data['s'] = cal_hash(encode_data(data))
 
-        refresh_print(f"阅读进度: 第 {index}/{READ_NUM} 次，已完成 {(index - 1) * 0.5:.1f} 分钟")
+        refresh_print(f"阅读进度: 第 {index}/{read_target} 次，已完成 {(index - 1) * 0.5:.1f} 分钟")
         logging.debug("data: %s", data)
         resData = read_response()
         logging.debug("response: %s", resData)
@@ -149,7 +211,7 @@ def run_read_task():
                 lastTime = thisTime
                 index += 1
                 time.sleep(30)
-                refresh_print(f"阅读进度: 第 {min(index, READ_NUM + 1) - 1}/{READ_NUM} 次，已完成 {(index - 1) * 0.5:.1f} 分钟")
+                refresh_print(f"阅读进度: 第 {index - 1}/{read_target} 次，已完成 {(index - 1) * 0.5:.1f} 分钟")
             else:
                 if synckey_repair_attempts >= SYNCKEY_REPAIR_LIMIT:
                     raise RuntimeError(f"连续 {SYNCKEY_REPAIR_LIMIT} 次未恢复阅读进度同步，终止运行。")

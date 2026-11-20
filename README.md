@@ -35,7 +35,8 @@
   - `PUSHPLUS_TOKEN` or `WXPUSHER_SPT` or `TELEGRAM_BOT_TOKEN`&`TELEGRAM_CHAT_ID` or `SERVERCHAN_SPT` or `DINGTALK_WEBHOOK`&`DINGTALK_SECRET`: 选择推送后填写对应token。
   
 - 在 **Variables** 部分，最下方添加变量：
-  - `READ_NUM`：设定每次阅读的目标次数。
+  - `READ_MODE`：可选。有官方统计密钥时默认使用 `adaptive`，没有则保持固定模式。可设为 `fixed` 明确关闭动态模式。
+  - `READ_NUM`：固定模式下的目标次数。
   - `PUSH_NOTIFY_TYPE`：推送类型，`all` 为成功和失败都推送，`fail_only` 为仅失败时推送。
 
 
@@ -54,7 +55,13 @@
 | `DINGTALK_WEBHOOK`          | 钉钉群机器人 Webhook               | 当 `PUSH_METHOD=dingtalk` 时必填，建议在钉钉机器人安全设置里开启“加签” | secrets   |
 | `DINGTALK_SECRET`          | 钉钉群机器人加签密钥               | 当钉钉机器人开启“加签”时必填，通常以 `SEC` 开头 | secrets   |
 
-**重要：`READ_NUM` 和 `PUSH_NOTIFY_TYPE` 配置在 variables，其它敏感信息都配置在 secrets 里面；需要推送时 `PUSH_METHOD` 是必填的。**
+**重要：`READ_MODE`、`READ_NUM` 和 `PUSH_NOTIFY_TYPE` 配置在 variables，其它敏感信息配置在 secrets 里面；需要推送时 `PUSH_METHOD` 是必填的。**
+
+不需要打卡。登录[微信读书官方配置页](https://weread.qq.com/r/weread-skills)取得 API Key，一次性添加到本仓库的 Actions Secrets，名称为 `WEREAD_API_KEY`。保持原有登录和钉钉密钥不变。
+
+动态模式在运行前读取北京时间当天的已同步时长：0 分钟随机运行 6～15 分钟；非零时，按 15 加上已读分钟数的平方除以 60 计算，向上取到半分钟，最多 90 分钟。已读 10、30、60 分钟对应约 17、30、75 分钟。任务启动之后的阅读不会改变本次目标。统计不可用时报错，不当成零。
+
+官方统计合计阅读和听书，不按来源区分。GitHub Actions 动态模式每天最多启动一次，开始前保存仅包含日期的标记；当天即使失败也不补跑，以免把脚本已产生的时长算成实读。请勿在同一天另用固定模式、其他仓库或本地脚本运行同一账号，否则官方统计可能混入这些时长。
 
 钉钉推送示例：
 
