@@ -1,0 +1,73 @@
+name: wxread queue alert
+
+on:
+  schedule:
+    - cron: '40 15 * * *'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-22.04
+    environment: AutoRead
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.10'
+
+    - name: Install notification dependency
+      run: python -m pip install requests==2.32.3
+
+    - name: Check for a reading start
+      id: check
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        export TZ=Asia/Shanghai
+        read -r day beijing_time <<< "$(date '+%F %H%M')"
+        if [[ "$beijing_time" < 2340 ]]; then
+          day=$(date -d "$day 12:00 yesterday" +%F)
+        fi
+        marker="wxread-started-$day"
+        count=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/artifacts" -f name="$marker" --jq '.total_count')
+        if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+          echo "::error::Could not verify whether the reading task started."
+          exit 1
+        fi
+        if [[ "$count" != 0 ]]; then
+          echo "Found a reading start for $day; no alert needed."
+          exit 0
+        fi
+        echo "day=$day" >> "$GITHUB_OUTPUT"
+
+    - name: Notify DingTalk if the task has not started
+      if: steps.check.outputs.day != ''
+      env:
+        DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+        DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+        READING_DAY: ${{ steps.check.outputs.day }}
+      run: |
+        python - <<'PY'
+        import logging
+        import os
+
+        from push import push
+
+        logging.getLogger("push").disabled = True
+        day = os.environ["READING_DAY"]
+        runs = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/workflows/deploy.yml"
+        message = (
+            f"{day} 的阅读任务在北京时间 23:40 的检查中仍未找到开始记录，"
+            f"可能仍在排队或未触发。运行记录：{runs}"
+        )
+        if not push(message, "dingtalk", is_success=False):
+            raise SystemExit("DingTalk did not accept the queue alert.")
+        print("DingTalk queue alert accepted.")
+        PY
