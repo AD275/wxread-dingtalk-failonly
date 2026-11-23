@@ -6,6 +6,8 @@ concurrency:
 
 on:
   schedule:
+    # 北京时间 12:15 午间任务，固定 2 分钟。
+    - cron: '15 4 * * *'
     # 北京时间 20:00 首次触发，22:00 检查是否需要补跑。
     - cron: '0 12 * * *'
     - cron: '0 14 * * *'
@@ -20,20 +22,30 @@ jobs:
       contents: read
 
     steps:
-    - name: Check evening schedule
+    - name: Check reading schedule
       id: schedule_gate
       env:
         EVENT_NAME: ${{ github.event_name }}
+        EVENT_SCHEDULE: ${{ github.event.schedule }}
       run: |
         read -r day beijing_time <<< "$(TZ=Asia/Shanghai date '+%F %H%M')"
-        if [[ "$EVENT_NAME" == schedule && "$beijing_time" < 2000 ]]; then
-          echo "Scheduled run arrived outside the evening window; skipping."
-          echo "should_run=false" >> "$GITHUB_OUTPUT"
-          exit 0
+        period=evening
+        if [[ "$EVENT_NAME" == schedule ]]; then
+          if [[ "$EVENT_SCHEDULE" == '15 4 * * *' ]]; then
+            period=midday
+            if [[ "$beijing_time" < 1215 || "$beijing_time" > 1959 ]]; then
+              echo "Scheduled midday run arrived outside its time window; skipping."
+              exit 0
+            fi
+          elif [[ "$beijing_time" < 2000 ]]; then
+            echo "Scheduled evening run arrived outside its time window; skipping."
+            exit 0
+          fi
         fi
         {
           echo "should_run=true"
           echo "day=$day"
+          echo "period=$period"
         } >> "$GITHUB_OUTPUT"
 
     - name: Set DNS to Google's DNS
@@ -58,23 +70,37 @@ jobs:
         python -m pip install --upgrade pip
         pip install certifi==2024.8.30 charset-normalizer==3.4.0 idna==3.10 requests==2.32.3 urllib3==2.2.3
 
-    - name: Check for an earlier run today
+    - name: Check for an earlier run in this period
       id: reading_day
       if: steps.schedule_gate.outputs.should_run == 'true'
       env:
         GH_TOKEN: ${{ github.token }}
         READING_DAY: ${{ steps.schedule_gate.outputs.day }}
+        READING_PERIOD: ${{ steps.schedule_gate.outputs.period }}
       run: |
         if [[ "$(TZ=Asia/Shanghai date +%F)" != "$READING_DAY" ]]; then
           echo "The Beijing date changed while preparing the task; skipping."
           exit 0
         fi
         marker="wxread-started-$READING_DAY"
+        if [[ "$READING_PERIOD" == midday ]]; then
+          marker="wxread-midday-started-$READING_DAY"
+        fi
         count=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/artifacts" -f name="$marker" --jq '.total_count')
         if [[ "$count" != 0 ]]; then
-          echo "Already started a reading task on $READING_DAY; skipping."
+          echo "Already started a $READING_PERIOD reading task on $READING_DAY; skipping."
           echo "proceed=false" >> "$GITHUB_OUTPUT"
           exit 0
+        fi
+        if [[ "$READING_PERIOD" == evening ]]; then
+          midday_count=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/artifacts" -f name="wxread-midday-started-$READING_DAY" --jq '.total_count')
+          if [[ ! "$midday_count" =~ ^[0-9]+$ ]]; then
+            echo "::error::Could not verify the midday reading record."
+            exit 1
+          fi
+          if [[ "$midday_count" != 0 ]]; then
+            echo "midday_started=true" >> "$GITHUB_OUTPUT"
+          fi
         fi
         printf '%s\n' "$READING_DAY" > "$RUNNER_TEMP/wxread-started.txt"
         {
@@ -82,7 +108,7 @@ jobs:
           echo "marker=$marker"
         } >> "$GITHUB_OUTPUT"
 
-    - name: Record today's first attempt
+    - name: Record today's first attempt for this period
       if: steps.reading_day.outputs.marker != ''
       uses: actions/upload-artifact@v7
       with:
@@ -104,17 +130,28 @@ jobs:
         SERVERCHAN_SPT:  ${{ secrets.SERVERCHAN_SPT }}
         DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
         DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
-        READ_MODE: ${{ vars.READ_MODE || (secrets.WEREAD_API_KEY != '' && 'adaptive') || 'fixed' }}
+        READ_MODE: ${{ (steps.schedule_gate.outputs.period == 'midday' && 'fixed') || vars.READ_MODE || (secrets.WEREAD_API_KEY != '' && 'adaptive') || 'fixed' }}
         WEREAD_API_KEY: ${{ secrets.WEREAD_API_KEY }}
         READING_DAY: ${{ steps.schedule_gate.outputs.day }}
-        READ_NUM: ${{ vars.READ_NUM }}  # 使用 Repository Variables
+        READING_PERIOD: ${{ steps.schedule_gate.outputs.period }}
+        MIDDAY_STARTED: ${{ steps.reading_day.outputs.midday_started }}
+        READ_NUM: ${{ (steps.schedule_gate.outputs.period == 'midday' && '4') || vars.READ_NUM }}
 
       run: |
-        if [[ "$(TZ=Asia/Shanghai date +%F)" != "$READING_DAY" ]]; then
+        read -r day beijing_time <<< "$(TZ=Asia/Shanghai date '+%F %H%M')"
+        if [[ "$day" != "$READING_DAY" ]]; then
           echo "The Beijing date changed before the script started; skipping."
           exit 0
         fi
-        python main.py
+        if [[ "$READING_PERIOD" == midday ]]; then
+          if [[ "$beijing_time" > 1959 ]]; then
+            echo "The midday window closed before the script started; skipping."
+            exit 0
+          fi
+          timeout 15m python main.py
+        else
+          python main.py
+        fi
 
   keepalive-job:
     name: Keepalive Workflow
