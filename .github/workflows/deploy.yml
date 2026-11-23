@@ -6,7 +6,7 @@ concurrency:
 
 on:
   schedule:
-    # 北京时间 12:15 午间任务，固定 2 分钟。
+    # 北京时间 12:15 午间任务，固定 5 分钟。
     - cron: '15 4 * * *'
     # 北京时间 20:00 首次触发，22:00 检查是否需要补跑。
     - cron: '0 12 * * *'
@@ -135,7 +135,7 @@ jobs:
         READING_DAY: ${{ steps.schedule_gate.outputs.day }}
         READING_PERIOD: ${{ steps.schedule_gate.outputs.period }}
         MIDDAY_STARTED: ${{ steps.reading_day.outputs.midday_started }}
-        READ_NUM: ${{ (steps.schedule_gate.outputs.period == 'midday' && '4') || vars.READ_NUM }}
+        READ_NUM: ${{ (steps.schedule_gate.outputs.period == 'midday' && '10') || vars.READ_NUM }}
 
       run: |
         read -r day beijing_time <<< "$(TZ=Asia/Shanghai date '+%F %H%M')"

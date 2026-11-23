@@ -176,7 +176,7 @@ def select_read_target(today):
         raise RuntimeError("当天运行记录未建立或已跨日，跳过本次动态任务。")
     seconds = fetch_read_seconds(today)
     if os.getenv("MIDDAY_STARTED") == "true":
-        seconds = max(0, seconds - 120)
+        seconds = max(0, seconds - 300)
     if seconds == 0:
         return random.randint(12, 30)
     return min(180, 30 + (seconds ** 2 + 107999) // 108000)
