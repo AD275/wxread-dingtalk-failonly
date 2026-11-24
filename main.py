@@ -178,12 +178,19 @@ def select_read_target(today):
     if os.getenv("MIDDAY_STARTED") == "true":
         seconds = max(0, seconds - 300)
     if seconds == 0:
-        return random.randint(12, 30)
-    return min(180, 30 + (seconds ** 2 + 107999) // 108000)
+        target = 10  # 当天没自己看书：象征性刷 5 分钟（10 次 × 30 秒）
+    else:
+        target = min(180, 30 + (seconds ** 2 + 107999) // 108000)
+    # 封顶到零点：每次阅读约 33 秒（含请求耗时），预留 45 秒缓冲，保证当天内刷完不跨天
+    now = datetime.now(BEIJING_TZ)
+    midnight = datetime.combine(today + timedelta(days=1), clock_time.min, BEIJING_TZ)
+    max_reads_by_time = max(0, int(((midnight - now).total_seconds() - 45) // 33))
+    return min(target, max_reads_by_time)
 
 
 def run_read_task():
-    read_target = select_read_target(datetime.now(BEIJING_TZ).date())
+    today = datetime.now(BEIJING_TZ).date()
+    read_target = select_read_target(today)
     refresh_cookie()
     index = 1
     lastTime = int(time.time()) - 30
@@ -191,6 +198,9 @@ def run_read_task():
     logging.info(f"一共需要阅读 {read_target} 次。")
 
     while index <= read_target:
+        if datetime.now(BEIJING_TZ).date() != today:
+            logging.info("已跨过零点，停止本次阅读，剩余次数作废。")
+            break
         data.pop('s')
         data['b'] = random.choice(book)
         data['c'] = random.choice(chapter)
